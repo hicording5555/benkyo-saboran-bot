@@ -12,5 +12,9 @@ services:
         sync: false
       - key: CRON_SECRET
         sync: false
+      - key: USERS_STORE_URL
+        sync: false
+      - key: USERS_STORE_SECRET
+        sync: false
       - key: TZ
         value: Asia/Tokyo
