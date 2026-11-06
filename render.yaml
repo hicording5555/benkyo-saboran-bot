@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: benkyo-saboran-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn -w 1 -b 0.0.0.0:$PORT app:app
+    envVars:
+      - key: LINE_CHANNEL_SECRET
+        sync: false
+      - key: LINE_CHANNEL_ACCESS_TOKEN
+        sync: false
+      - key: CRON_SECRET
+        sync: false
+      - key: TZ
+        value: Asia/Tokyo

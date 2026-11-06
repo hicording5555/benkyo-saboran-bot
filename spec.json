@@ -1,0 +1,13 @@
+{
+  "name": "べんきょうサボらんBot",
+  "purpose": "平日16:30に勉強の声かけ・リマインド",
+  "platform": "LINE Messaging API",
+  "timezone": "Asia/Tokyo",
+  "schedule": "weekday 16:30",
+  "tone": "少しユーモアあり",
+  "mvp": [
+    "平日定時リマインド",
+    "「やった」返信で完了記録",
+    "連続達成日数"
+  ]
+}
