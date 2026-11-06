@@ -10,17 +10,22 @@ from zoneinfo import ZoneInfo
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from dotenv import load_dotenv
+
+load_dotenv()
+
 from flask import Flask, abort, request
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
     ApiClient,
+    BroadcastRequest,
     Configuration,
     MessagingApi,
     PushMessageRequest,
     ReplyMessageRequest,
     TextMessage,
 )
+from linebot.v3.messaging.exceptions import ApiException
 from linebot.v3.webhooks import (
     FollowEvent,
     MessageEvent,
@@ -29,8 +34,6 @@ from linebot.v3.webhooks import (
 
 import messages
 import storage
-
-load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("benkyo-saboran")
@@ -70,29 +73,89 @@ def push_text(user_id: str, text: str) -> None:
     )
 
 
-def send_weekday_reminders() -> None:
+def broadcast_text(text: str) -> None:
+    _api().broadcast(BroadcastRequest(messages=[TextMessage(text=text)]))
+
+
+def fetch_follower_ids() -> list[str] | None:
+    """友だち ID 一覧。認証済み/プレミアム以外では API が 403 なので None。"""
+    if not configuration:
+        logger.info("LINEトークン未設定のためフォロワーID取得をスキップ")
+        return None
+    try:
+        api = _api()
+        found: list[str] = []
+        start: str | None = None
+        seen: set[str] = set()
+        for _ in range(50):
+            if start:
+                if start in seen:
+                    break
+                seen.add(start)
+            page = api.get_followers(start=start, limit=1000)
+            found.extend(page.user_ids or [])
+            start = page.next
+            if not start:
+                break
+        return found
+    except ApiException as exc:
+        # 標準の Messaging API チャネルは verified/premium 限定のため 403 になる。
+        logger.info("フォロワーID APIは利用不可 status=%s", exc.status)
+        return None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("フォロワーID取得に失敗: %s", type(exc).__name__)
+        return None
+
+
+def send_weekday_reminders() -> dict:
     now = datetime.now(TZ)
     if now.weekday() >= 5:
         logger.info("週末のためリマインドをスキップ")
-        return
+        return {"ok": True, "skipped": "weekend", "users": len(storage.all_user_ids())}
+
     text = messages.reminder_text()
+    followers = fetch_follower_ids()
+    if followers is not None:
+        storage.remember_users(followers)
+
     users = storage.all_user_ids()
-    logger.info("リマインド送信開始: %s人", len(users))
-    for uid in users:
-        try:
-            push_text(uid, text)
-        except Exception:
-            logger.exception("push失敗: %s", uid)
+    if users:
+        sent = 0
+        logger.info("リマインド送信開始: %s人", len(users))
+        for uid in users:
+            try:
+                push_text(uid, text)
+                sent += 1
+            except Exception:
+                logger.exception("push失敗: %s", uid)
+        return {"ok": True, "mode": "push", "users": len(users), "sent": sent}
+
+    if followers is not None:
+        logger.info("送信先の友だちがいないためリマインドをスキップ")
+        return {"ok": True, "mode": "none", "users": 0}
+
+    try:
+        broadcast_text(text)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ブロードキャスト失敗: %s", type(exc).__name__)
+        return {"ok": False, "mode": "broadcast_failed", "users": 0}
+    logger.info("登録が空のためブロードキャストでリマインド")
+    return {"ok": True, "mode": "broadcast", "users": 0}
 
 
 @app.get("/")
 def health():
-    return {
+    info = storage.status()
+    body = {
         "name": "べんきょうサボらんBot",
         "ok": True,
-        "users": len(storage.all_user_ids()),
+        "users": info["users"],
+        "durable": info["enabled"],
         "now": datetime.now(TZ).isoformat(),
     }
+    if info["error"]:
+        body["storage_error"] = info["error"]
+    return body
 
 
 @app.post("/cron/remind")
@@ -101,8 +164,12 @@ def cron_remind():
     secret = request.headers.get("X-Cron-Secret") or request.args.get("secret", "")
     if not CRON_SECRET or secret != CRON_SECRET:
         abort(401)
-    send_weekday_reminders()
-    return {"ok": True, "users": len(storage.all_user_ids())}
+    result = send_weekday_reminders()
+    return {
+        "ok": bool(result.get("ok", True)),
+        "users": result.get("users", 0),
+        "mode": result.get("mode") or result.get("skipped"),
+    }
 
 
 @app.post("/callback")
